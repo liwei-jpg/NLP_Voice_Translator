@@ -1,0 +1,12 @@
+# Python and Environments
+venv/
+__pycache__/
+*.pyc
+
+# Temporary Audio Files
+*.mp3
+*.wav
+
+# Ignore large datasets if you downloaded any locally
+*.csv
+*.jsonl
