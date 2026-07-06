@@ -10,3 +10,5 @@ __pycache__/
 # Ignore large datasets if you downloaded any locally
 *.csv
 *.jsonl
+
+mbart_es_results/
