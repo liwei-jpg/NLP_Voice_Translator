@@ -1,23 +1,19 @@
 import torch
 from transformers import MBartForConditionalGeneration, MBart50TokenizerFast
 from peft import PeftModel
-import gradio as gr  # Gradio is the web-server library that lets you build a clean GUI for your AI
-import whisper      # Whisper handles the "Ears": converting your voice to text
-import edge_tts     # Microsoft's TTS: handles the "Mouth": converting text to natural audio
-import asyncio      # Async handles the non-blocking download of audio files
-import tempfile     # Creates temporary storage to keep your hard drive clean
+import gradio as gr
+import whisper
+import edge_tts
+import asyncio
+import tempfile
 
 print("⚙️ Loading AI Models... (This will take a few moments)")
 
 # 1. Load the "Ears" (Whisper)
-# We use the 'small' model. It is optimized for speed; it hears and transcribes 
-# audio fast enough for a real-time conversation.
 print("🎧 Loading Whisper Speech Recognition...")
 asr_model = whisper.load_model("small")
 
 # 2. Load the "Brain" (mBART + Your LoRA Adapter)
-# We load the huge mBART foundation model (Brain), then merge it with your 
-# saved LoRA weights (your fine-tuned 'skill').
 print("🧠 Loading mBART Translation Model...")
 MODEL_NAME = "facebook/mbart-large-50-many-to-many-mmt"
 tokenizer = MBart50TokenizerFast.from_pretrained(MODEL_NAME)
@@ -28,66 +24,64 @@ print("✅ Full Voice-to-Voice System Online!")
 
 # --- HELPER FUNCTION: TEXT TO SPEECH ---
 def generate_voice_audio(text, target_language):
-    # This logic detects which voice profile to fetch from Microsoft's server.
+    # Dynamically select the voice based on the target translation language
     if target_language == "es":
-        voice_model = "es-ES-AlvaroNeural"  # A male, high-quality Spanish neural voice.
+        voice_model = "es-ES-AlvaroNeural"  # Spanish Voice
     else:
-        voice_model = "en-US-ChristopherNeural" # A male, high-quality English neural voice.
+        voice_model = "en-US-ChristopherNeural" # English Voice
         
     communicate = edge_tts.Communicate(text, voice_model)
     
-    # We use tempfile so we don't permanently fill your laptop with audio files.
-    # delete=False ensures the file stays alive until the speaker plays it.
+    # Create temp file that Gradio will manage and automatically clean up
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
     temp_filename = temp_file.name
     temp_file.close() 
     
-    # asyncio.run runs the background downloading code (communicating with Microsoft) 
-    # to save the file.
+    # Run the asynchronous save operation safely
     asyncio.run(communicate.save(temp_filename))
     return temp_filename
 
 # --- MAIN PIPELINE FUNCTION (AUTO-DETECT) ---
 def process_voice_to_voice(audio_filepath):
-    # If the user clicks translate without recording, prevent a crash.
     if not audio_filepath:
         return "No audio detected.", "Please record something.", None
         
     print("\n🎤 1. Analyzing audio...")
     
-    # Step 1: Transcribe using Whisper
-    # 'condition_on_previous_text=False' is critical here: It stops Whisper 
-    # from 'remembering' what it heard last time, preventing hallucination loops.
+    # Step 1: Transcribe with punctuation hints to fix Spanish accents
     transcription = asr_model.transcribe(
         audio_filepath,
-        condition_on_previous_text=False
+        condition_on_previous_text=False # This strictly prevents repetitive hallucination loops
     )
     recognized_text = transcription["text"].strip()
-    detected_lang = transcription["language"] # Whisper tells us if it's 'en' or 'es'
+    detected_lang = transcription["language"] # Returns 'en' or 'es'
     
     print("⚙️ 2. Routing & Translating...")
     
-    # Step 2: Dynamic Routing Logic
-    # We change the system configuration based on whether we heard English or Spanish.
+    # Step 2: Dynamic Logic based on detected language
     if detected_lang == "en":
-        src_code, tgt_code, target_audio_lang = "en_XX", "es_XX", "es"
+        print(f"   Detected English. Translating to Spanish...")
+        src_code = "en_XX"
+        tgt_code = "es_XX"
+        target_audio_lang = "es"
         lang_label = "[Detected: English]"
     elif detected_lang == "es":
-        src_code, tgt_code, target_audio_lang = "es_XX", "en_XX", "en"
+        print(f"   Detected Spanish. Translating to English...")
+        src_code = "es_XX"
+        tgt_code = "en_XX"
+        target_audio_lang = "en"
         lang_label = "[Detected: Spanish]"
     else:
-        # If Whisper detects an unsupported language, stop the pipeline to save resources.
+        # Fallback if it hears background noise and thinks it's French/German etc.
         return f"[Detected: {detected_lang}] Could not clearly hear English or Spanish.", "", None
 
     # Step 3: Prepare text for translation
-    tokenizer.src_lang = src_code # Tell the tokenizer which language code to prepend
-    inputs = tokenizer(recognized_text, return_tensors="pt") # Convert text to numbers
+    tokenizer.src_lang = src_code
+    inputs = tokenizer(recognized_text, return_tensors="pt")
     
-    # Step 4: Translation Inference
-    # torch.no_grad() disables gradient calculation to make generation faster and use less RAM.
     with torch.no_grad():
-        # ADAPTER BIAS FIX: If detecting Spanish, we disable the LoRA adapter.
-        # Why? Because your LoRA was trained EN->ES. Using it for ES->EN can skew output.
+        # Step 4: Translate with adapter logic
+        # Disable the adapter for ES->EN to prevent the Spanish-only bias
         if detected_lang == "es":
             with model.disable_adapter():
                 generated_tokens = model.generate(
@@ -95,13 +89,12 @@ def process_voice_to_voice(audio_filepath):
                     forced_bos_token_id=tokenizer.lang_code_to_id[tgt_code]
                 )
         else:
-            # If detecting English, we keep the adapter ON to use your 'conversational' skills.
+            # Leave the LoRA adapter ON for EN->ES
             generated_tokens = model.generate(
                 **inputs,
                 forced_bos_token_id=tokenizer.lang_code_to_id[tgt_code]
             )
     
-    # Turn the number tokens generated by the model back into human words
     translated_text = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
     
     print("🔊 3. Generating audio response...")
@@ -110,35 +103,34 @@ def process_voice_to_voice(audio_filepath):
     
     print("✅ Pipeline complete!")
     
-    # Combine the language label with the text so the user sees what was detected.
+    # Combine the label and the text for a clean UI output
     final_original_text = f"{lang_label} {recognized_text}"
     
     return final_original_text, translated_text, audio_output_path
 
 # --- GRADIO UI LAYOUT ---
-# Gradio automatically creates a beautiful responsive webpage for your Python code.
 with gr.Blocks(title="Smart AI Voice Translator") as demo:
     gr.Markdown("# 🎙️ Smart Auto-Detect AI Translator")
-    gr.Markdown("Click record and speak. The AI auto-detects language and replies.")
+    gr.Markdown("Click record and speak in **either** English or Spanish. The AI will automatically detect your language and translate it.")
     
-    # Gradio's Audio component automatically handles recording and microphone permissions.
     with gr.Row():
-        audio_in = gr.Audio(sources=["microphone"], type="filepath", label="Speak now")
+        audio_in = gr.Audio(
+            sources=["microphone"], 
+            type="filepath", 
+            label="1. Tap to Speak (Wait 1 second before talking)"
+        )
         
     with gr.Row():
         submit_btn = gr.Button("⚡ Auto-Translate", variant="primary")
         
-    # Text outputs show the user exactly what the AI understood (ASR) 
-    # and what it produced (Translation).
     with gr.Row():
-        text_out_original = gr.Textbox(label="What the AI Heard", interactive=False)
-        text_out_translated = gr.Textbox(label="Translation", interactive=False)
+        text_out_original = gr.Textbox(label="2. What the AI Heard", interactive=False)
+        text_out_translated = gr.Textbox(label="3. Translation", interactive=False)
         
-    # Final output is the audio playback
     with gr.Row():
-        audio_out = gr.Audio(label="Spoken Translation", interactive=False)
+        audio_out = gr.Audio(label="4. Spoken Translation", interactive=False)
         
-    # The glue code: link button click -> process function -> update input/output fields
+    # Bind the pipeline to the button
     submit_btn.click(
         fn=process_voice_to_voice,
         inputs=audio_in,
@@ -146,6 +138,5 @@ with gr.Blocks(title="Smart AI Voice Translator") as demo:
     )
 
 if __name__ == "__main__":
-    # Launch the web server on your local machine
     print("🚀 Launching the local interface web server...")
     demo.launch(share=False)
