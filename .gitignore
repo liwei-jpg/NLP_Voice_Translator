@@ -12,3 +12,4 @@ __pycache__/
 *.jsonl
 
 mbart_es_results/
+NLP_Voice_Translator/
